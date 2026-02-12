@@ -12,6 +12,15 @@ print(" STARTING AUTOMATED DATA STREAM...")
 print(f" Sending live orders to: {API_URL}")
 print("Press CTRL+C to stop.")
 
+# Inside realtime_producer.py
+headers = {
+    "Content-Type": "application/json",
+    "x-api-key": "retail-hackathon-secure-key-123"  # <--- THE KEY
+}
+
+# Update the post request:
+
+
 while True:
     try:
         # 1. Generate a random order (Simulating a customer buying something)
@@ -25,7 +34,7 @@ while True:
         }
 
         # 2. Push to API (The "Automated Pathway")
-        response = requests.post(API_URL, json=payload)
+        response = requests.post(API_URL, json=payload, headers=headers)
 
         if response.status_code == 200:
             print(f" Sent Order: ${payload['total_amount']} from {payload['source']}")
