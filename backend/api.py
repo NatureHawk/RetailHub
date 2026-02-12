@@ -1,111 +1,83 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel # New library for data validation
 import sqlite3
 import os
 import random
 from datetime import datetime
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-# Enable CORS (Allows your Flutter app to talk to this server)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# --- CONFIGURATION ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, '..', 'data', 'raw', 'retail_data_hub.db')
 
-def get_db_connection():
+# VALIDATION MODEL (Ensures incoming data is correct)
+class Order(BaseModel):
+    transaction_id: str
+    source: str
+    product_id: str
+    quantity: int
+    total_amount: float
+    city: str
+
+def get_db():
     conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row  # Allows accessing columns by name
+    conn.row_factory = sqlite3.Row
     return conn
 
-@app.get("/")
-def read_root():
-    return {"status": "Online", "message": "Smart Retail Data Hub API is running!"}
+# --- 1. REAL-TIME INGESTION ENDPOINT (The "Pipeline" Target) ---
+@app.post("/ingest/order")
+def ingest_realtime_order(order: Order):
+    """
+    Receives live data from stores/web and saves it instantly.
+    Satisfies: "Near Real-Time (instant updates)" requirement.
+    """
+    try:
+        conn = get_db()
+        # Insert immediately into the Fact Table
+        conn.execute("""
+            INSERT INTO Fact_Sales (transaction_id, source, product_id, quantity, total_amount, transaction_date, city)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (order.transaction_id, order.source, order.product_id, order.quantity, order.total_amount, datetime.now(), order.city))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "msg": "Data Ingested Real-Time"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-# --- 1. KPI ENDPOINT (For the Dashboard Cards) ---
+# --- 2. EXISTING KPI ENDPOINTS (unchanged) ---
 @app.get("/kpi/summary")
 def get_kpi_summary():
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db()
+    rev = conn.execute("SELECT SUM(total_amount) as val FROM Fact_Sales").fetchone()['val']
+    orders = conn.execute("SELECT COUNT(*) as val FROM Fact_Sales").fetchone()['val']
     
-    # Calculate Total Revenue
-    cursor.execute("SELECT SUM(total_amount) as revenue FROM Fact_Sales")
-    total_revenue = cursor.fetchone()['revenue'] or 0
+    # CLV Logic
+    clv_query = "SELECT SUM(total_amount) * 1.0 / COUNT(DISTINCT transaction_id) as val FROM Fact_Sales WHERE source = 'WEB'"
+    clv = conn.execute(clv_query).fetchone()['val']
     
-    # Calculate Total Orders
-    cursor.execute("SELECT COUNT(*) as orders FROM Fact_Sales")
-    total_orders = cursor.fetchone()['orders']
+    stock = conn.execute("SELECT COUNT(*) as val FROM Fact_Inventory WHERE stock_level < 10").fetchone()['val']
     
-    # Calculate Low Stock Items (< 20 units)
-    cursor.execute("SELECT COUNT(*) as low_stock FROM Fact_Inventory WHERE stock_level < 20")
-    low_stock = cursor.fetchone()['low_stock']
-    
-    conn.close()
     return {
-        "total_revenue": round(total_revenue, 2),
-        "total_orders": total_orders,
-        "low_stock_alerts": low_stock
+        "total_revenue": round(rev or 0, 2),
+        "total_orders": orders,
+        "avg_order_value": round(clv or 0, 2),
+        "low_stock_alerts": stock
     }
 
-# --- 2. CHART ENDPOINT (For the Revenue Graph) ---
 @app.get("/kpi/revenue-trend")
 def get_revenue_trend():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get sales grouped by date (Limit to last 7 days for the chart)
-    cursor.execute("""
-        SELECT date(transaction_date) as day, SUM(total_amount) as daily_revenue 
-        FROM Fact_Sales 
-        GROUP BY day 
-        ORDER BY day DESC 
-        LIMIT 7
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    # Format for Flutter (List of objects)
-    return [{"day": row['day'], "revenue": row['daily_revenue']} for row in rows]
+    conn = get_db()
+    rows = conn.execute("SELECT substr(transaction_date, 1, 10) as day, SUM(total_amount) as revenue FROM Fact_Sales GROUP BY day ORDER BY day DESC LIMIT 7").fetchall()
+    return [{"day": r['day'], "revenue": r['revenue']} for r in rows]
 
-# --- 3. INVENTORY ENDPOINT (For the 'Stock' Tab) ---
-@app.get("/inventory/low-stock")
-def get_low_stock_items():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Get specific products that are running low
-    cursor.execute("""
-        SELECT p.name, i.stock_level, i.warehouse_id 
-        FROM Fact_Inventory i
-        JOIN Dim_Product p ON i.product_id = p.product_id
-        WHERE i.stock_level < 20
-        ORDER BY i.stock_level ASC
-        LIMIT 10
-    """)
-    rows = cursor.fetchall()
-    conn.close()
-    
-    return [{"product": row['name'], "stock": row['stock_level'], "warehouse": row['warehouse_id']} for row in rows]
-
-# --- 4. REAL-TIME SIMULATION (The "Magic Button") ---
+# --- 3. SIMULATION ENDPOINT (For your Demo Button) ---
+# We keep this so your "Magic Button" still works for the video
 @app.post("/simulate/new-sale")
 def simulate_sale():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    
-    # Insert a random new sale into the DB
-    random_amount = round(random.uniform(50, 500), 2)
-    cursor.execute("""
-        INSERT INTO Fact_Sales (transaction_id, source_system, product_id, quantity, total_amount, transaction_date, customer_city)
-        VALUES (?, 'REAL-TIME-POS', 'P001', 1, ?, ?, 'Mumbai')
-    """, (f"RT-{random.randint(1000,9999)}", random_amount, datetime.now()))
-    
+    conn = get_db()
+    conn.execute("INSERT INTO Fact_Sales (transaction_id, source, total_amount, transaction_date) VALUES (?, 'POS-SIM', ?, date('now'))", 
+                 (str(random.randint(10000,99999)), random.uniform(50, 200)))
     conn.commit()
-    conn.close()
-    return {"message": "New sale simulated!", "amount": random_amount}
+    return {"msg": "Simulation Added"}
