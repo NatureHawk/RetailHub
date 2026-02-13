@@ -185,7 +185,7 @@ def get_customer_data():
         ORDER BY frequency DESC LIMIT 5
     """).fetchall()
     total_transactions = conn.execute("SELECT COUNT(DISTINCT transaction_id) FROM Fact_Sales").fetchone()[0] or 1
-    market_basket = [{"pair": f"{r['item1']} + {r['item2']}", "percent": round(r['frequency'] / total_transactions * 100, 1)} for r in basket]
+    market_basket = [{"pair": f"{r['item1']} + {r['item2']}", "count": r['frequency']} for r in basket]
 
     return {
         "retention": retention,
