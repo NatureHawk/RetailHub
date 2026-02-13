@@ -1,10 +1,20 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 import sqlite3
 import os
+import random
+from datetime import datetime
 
 app = FastAPI()
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# --- SECURITY ---
+API_SECRET_KEY = "retail-hackathon-secure-key-123"
+
+async def verify_key(x_api_key: str = Header(None)):
+    if x_api_key != API_SECRET_KEY:
+        raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, '..', 'data', 'raw', 'retail_data_hub.db')
@@ -14,94 +24,234 @@ def get_db():
     conn.row_factory = sqlite3.Row
     return conn
 
-# --- TAB 1: COMMERCIAL ANALYTICS ---
+# --- UPDATED DATA MODEL ---
+class Order(BaseModel):
+    transaction_id: str
+    source: str
+    product_id: str
+    quantity: int
+    total_amount: float
+    city: str
+    customer_name: str
+    season: str
+
+# --- 1. REAL-TIME INGESTION ---
+@app.post("/ingest/order", dependencies=[Depends(verify_key)])
+def ingest_realtime_order(order: Order):
+    try:
+        conn = get_db()
+        conn.execute("""
+            INSERT INTO Fact_Sales (
+                transaction_id, date_key, product_key, quantity, total_amount, 
+                city, source_system, customer_name, season
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            order.transaction_id, 
+            datetime.now().strftime("%Y-%m-%d"), 
+            order.product_id, 
+            order.quantity, 
+            order.total_amount, 
+            order.city, 
+            order.source,
+            order.customer_name,
+            order.season
+        ))
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# --- 2. DEMO SIMULATION ---
+@app.post("/simulate/new-sale")
+def simulate_sale():
+    conn = get_db()
+    seasons = ['Winter', 'Spring', 'Summer', 'Fall']
+    # Added random city selection so filters work better
+    cities = ['New York', 'London', 'Mumbai', 'Demo City'] 
+    conn.execute("""
+        INSERT INTO Fact_Sales (
+            transaction_id, date_key, product_key, quantity, total_amount, 
+            source_system, season, customer_name, city
+        )
+        VALUES (?, date('now'), 'Simulated Product', 1, ?, 'SIMULATOR', ?, 'Demo User', ?)
+    """, (
+        str(random.randint(1000,9999)), 
+        random.uniform(20, 100), 
+        random.choice(seasons),
+        random.choice(cities)
+    ))
+    conn.commit()
+    return {"msg": "Sale Simulated"}
+
+
+# --- 4. ANALYTICS TABS (EXISTING) ---
+
 @app.get("/analytics/commercial")
 def get_commercial_data():
     conn = get_db()
-    
-    # 1. Monthly Revenue
-    rev_query = """
-        SELECT strftime('%Y-%m', date_key) as month, SUM(total_amount) as revenue 
-        FROM Fact_Sales GROUP BY month ORDER BY month DESC LIMIT 12
-    """
-    revenue = conn.execute(rev_query).fetchall()
-    
-    # 2. Top Selling Products
-    top_prod_query = """
-        SELECT product_key, COUNT(*) as units_sold 
-        FROM Fact_Sales GROUP BY product_key ORDER BY units_sold DESC LIMIT 5
-    """
-    top_products = conn.execute(top_prod_query).fetchall()
-    
-    # 3. City-wise Sales
-    city_query = """
-        SELECT city, SUM(total_amount) as revenue 
-        FROM Fact_Sales GROUP BY city ORDER BY revenue DESC LIMIT 5
-    """
-    city_sales = conn.execute(city_query).fetchall()
-    
+    rev = conn.execute("SELECT strftime('%Y-%m', date_key) as month, SUM(total_amount) as revenue FROM Fact_Sales GROUP BY month ORDER BY month DESC LIMIT 12").fetchall()
+    prod = conn.execute("SELECT product_key, COUNT(*) as units FROM Fact_Sales GROUP BY product_key ORDER BY units DESC LIMIT 5").fetchall()
     return {
-        "monthly_revenue": [{"month": r['month'], "revenue": r['revenue']} for r in revenue],
-        "top_products": [{"name": r['product_key'], "sold": r['units_sold']} for r in top_products],
-        "city_sales": [{"city": r['city'], "revenue": r['revenue']} for r in city_sales]
+        "monthly_revenue": [{"month": r['month'], "revenue": r['revenue']} for r in rev],
+        "top_products": [{"name": r['product_key'], "sold": r['units']} for r in prod]
     }
 
-# --- TAB 2: OPERATIONS ANALYTICS ---
 @app.get("/analytics/operations")
 def get_operations_data():
     conn = get_db()
-    
-    # 1. Inventory Turnover (Avg of generated data)
-    inv_query = "SELECT AVG(turnover_ratio) as val, SUM(stock_level) as total_stock FROM Fact_Inventory"
-    inv = conn.execute(inv_query).fetchone()
-    
-    # 2. Avg Delivery Time
-    del_query = "SELECT AVG(delivery_days) as val FROM Fact_Shipments"
-    delivery = conn.execute(del_query).fetchone()
-    
+    seasonal = conn.execute("SELECT season, COUNT(*) as sales_count FROM Fact_Sales WHERE season IS NOT NULL GROUP BY season ORDER BY sales_count DESC").fetchall()
+    inv = conn.execute("SELECT AVG(turnover_ratio) as val FROM Fact_Inventory").fetchone()
+    delivery = conn.execute("SELECT AVG(delivery_days) as val FROM Fact_Shipments").fetchone()
     return {
+        "seasonal_trends": [{"season": r['season'], "sales": r['sales_count']} for r in seasonal],
         "inventory_turnover": round(inv['val'] or 0, 2),
-        "total_stock": inv['total_stock'] or 0,
         "avg_delivery_days": round(delivery['val'] or 0, 1)
     }
 
-# --- TAB 3: CUSTOMER ANALYTICS ---
 @app.get("/analytics/customer")
 def get_customer_data():
     conn = get_db()
-    
-    # 1. New vs Returning (Simplified logic: Transactions > 1)
-    # This requires grouping by customer first
-    ret_query = """
-        SELECT 
-            CASE WHEN cnt > 1 THEN 'Returning' ELSE 'New' END as type,
-            COUNT(*) as count
-        FROM (SELECT customer_name, COUNT(*) as cnt FROM Fact_Sales GROUP BY customer_name)
-        GROUP BY type
-    """
-    shoppers = conn.execute(ret_query).fetchall()
-    
-    # 2. Customer Lifetime Value (Top 5)
-    clv_query = """
-        SELECT customer_name, SUM(total_amount) as clv 
-        FROM Fact_Sales GROUP BY customer_name ORDER BY clv DESC LIMIT 5
-    """
-    clv = conn.execute(clv_query).fetchall()
-    
-    # 3. Market Basket Analysis (Simplified Pairs)
-    # Using the exploded Fact_Sales to find products in same transaction
-    basket_query = """
+
+    # --- Retention: New vs Returning customers ---
+    total_customers = conn.execute("SELECT COUNT(DISTINCT customer_name) FROM Fact_Sales").fetchone()[0] or 1
+    returning = conn.execute("SELECT COUNT(*) FROM (SELECT customer_name FROM Fact_Sales GROUP BY customer_name HAVING COUNT(DISTINCT transaction_id) > 1)").fetchone()[0]
+    new_customers = total_customers - returning
+    retention = [
+        {"name": "New", "value": new_customers},
+        {"name": "Returning", "value": returning}
+    ]
+
+    # --- CLV Trend: average customer lifetime value by month ---
+    clv_rows = conn.execute("""
+        SELECT strftime('%Y-%m', date_key) as month, ROUND(AVG(total_amount), 2) as value
+        FROM Fact_Sales
+        WHERE date_key IS NOT NULL
+        GROUP BY month
+        ORDER BY month DESC
+        LIMIT 12
+    """).fetchall()
+    clv_trend = list(reversed([{"month": r["month"], "value": r["value"]} for r in clv_rows]))
+
+    # --- Market Basket: frequently bought together ---
+    basket = conn.execute("""
         SELECT A.product_key as item1, B.product_key as item2, COUNT(*) as frequency
         FROM Fact_Sales A
         JOIN Fact_Sales B ON A.transaction_id = B.transaction_id
         WHERE A.product_key < B.product_key
+        AND A.product_key NOT LIKE '%Toothpaste%' AND B.product_key NOT LIKE '%Toothpaste%'
         GROUP BY item1, item2
         ORDER BY frequency DESC LIMIT 5
-    """
-    basket = conn.execute(basket_query).fetchall()
-    
+    """).fetchall()
+    total_transactions = conn.execute("SELECT COUNT(DISTINCT transaction_id) FROM Fact_Sales").fetchone()[0] or 1
+    market_basket = [{"pair": f"{r['item1']} + {r['item2']}", "percent": round(r['frequency'] / total_transactions * 100, 1)} for r in basket]
+
     return {
-        "shopper_type": [{"type": r['type'], "count": r['count']} for r in shoppers],
-        "top_clv": [{"customer": r['customer_name'], "value": r['clv']} for r in clv],
-        "market_basket": [{"pair": f"{r['item1']} + {r['item2']}", "count": r['frequency']} for r in basket]
+        "retention": retention,
+        "clv_trend": clv_trend,
+        "market_basket": market_basket
+    }
+@app.get("/analytics/overview-filtered")
+def get_overview_filtered(period: str, city: str):
+    conn = get_db()
+    
+    # 1. Handle Time Filter
+    if period == "Last 30 Days":
+        date_filter = "date_key >= date('now', '-30 days')"
+        label_fmt = "date_key" # Show individual days
+    else: # Last 6 Months
+        date_filter = "date_key >= date('now', '-6 months')"
+        label_fmt = "strftime('%Y-%m', date_key)" # Show months
+
+    # 2. Handle City Filter
+    city_clause = ""
+    params = []
+    if city != "All Cities":
+        city_clause = "AND city = ?"
+        params.append(city)
+
+    # 3. Query for the Bar Chart
+    query = f"""
+        SELECT {label_fmt} as name, SUM(total_amount) as revenue 
+        FROM Fact_Sales 
+        WHERE {date_filter} {city_clause}
+        GROUP BY name ORDER BY name ASC
+    """
+    chart_rows = conn.execute(query, params).fetchall()
+
+    # 4. Query for Top Products
+    prod_query = f"""
+        SELECT product_key as name, COUNT(*) as sales 
+        FROM Fact_Sales 
+        WHERE {date_filter} {city_clause}
+        GROUP BY name ORDER BY sales DESC LIMIT 5
+    """
+    prod_rows = conn.execute(prod_query, params).fetchall()
+
+    return {
+        "chartData": [{"name": r['name'], "revenue": r['revenue']} for r in chart_rows],
+        "productList": [{"name": r['name'], "sales": r['sales']} for r in prod_rows]
+    }
+# --- 3. SMART FILTER ENDPOINT ---
+# --- 3. SMART FILTER ENDPOINT ---
+@app.get("/analytics/filter")
+def get_filtered_data(period: str, city: str, year: str = "All Years"):
+    conn = get_db()
+    
+    # --- 1. FIND THE SMART REFERENCE DATE ---
+    # Find the latest date in the database based on the selected year
+    base_date_query = "SELECT MAX(date_key) FROM Fact_Sales WHERE 1=1"
+    base_params = []
+    if year != "All Years":
+        base_date_query += " AND strftime('%Y', date_key) = ?"
+        base_params.append(year)
+        
+    max_date_row = conn.execute(base_date_query, base_params).fetchone()
+    
+    # If the database has data, use the max date as 'now'. Otherwise, use today.
+    if max_date_row and max_date_row[0]:
+        ref_date = max_date_row[0]
+    else:
+        ref_date = datetime.now().strftime("%Y-%m-%d")
+
+    # --- 2. BUILD THE MAIN QUERY ---
+    sql = "SELECT date_key, total_amount, product_key FROM Fact_Sales WHERE 1=1"
+    params = []
+
+    # Apply City Filter
+    if city != "All Cities":
+        sql += " AND city = ?"
+        params.append(city)
+
+    # Apply Year Filter
+    if year != "All Years":
+        sql += " AND strftime('%Y', date_key) = ?"
+        params.append(year)
+
+    # Apply Time Filter relative to the SMART reference date
+    if period == "Last 30 Days":
+        sql += f" AND date_key >= date('{ref_date}', '-30 days')"
+        group_by = "date_key" # Group by day
+    elif period == "Last 6 Months":
+        sql += f" AND date_key >= date('{ref_date}', '-6 months')"
+        group_by = "strftime('%Y-%m', date_key)" # Group by month
+    elif period == "Last Year":
+        sql += f" AND date_key >= date('{ref_date}', '-1 year')"
+        group_by = "strftime('%Y-%m', date_key)" # Group by month
+    else: # "All Time"
+        if year != "All Years":
+            group_by = "strftime('%Y-%m', date_key)" # Show months of that specific year
+        else:
+            group_by = "strftime('%Y', date_key)" # Show full years
+
+    # --- 3. EXECUTE QUERIES ---
+    rev_sql = f"SELECT {group_by} as label, SUM(total_amount) as val FROM ({sql}) GROUP BY label ORDER BY label"
+    revenue_rows = conn.execute(rev_sql, params).fetchall()
+
+    prod_sql = f"SELECT product_key, COUNT(*) as val FROM ({sql}) GROUP BY product_key ORDER BY val DESC LIMIT 5"
+    prod_rows = conn.execute(prod_sql, params).fetchall()
+
+    return {
+        "revenue_chart": [{"name": r['label'] or 'Unknown', "revenue": r['val']} for r in revenue_rows],
+        "top_products": [{"name": r['product_key'], "sales": r['val']} for r in prod_rows]
     }
