@@ -1,7 +1,8 @@
 import pandas as pd
 import sqlite3
 import os
-import ast 
+import ast
+import json
 import random
 from datetime import datetime
 
@@ -115,13 +116,51 @@ def run_pipeline():
     else:
         print(f"   ⚠️ Warning: Generated file not found at {gen_path}")
 
+    # File 3: The Web Orders JSON (Online Channel)
+    json_path = os.path.join(DATA_DIR, 'web_orders.json')
+    df_web = pd.DataFrame()
+    if os.path.exists(json_path):
+        print("   Found Web Orders JSON (Online)")
+        with open(json_path, 'r') as f:
+            web_data = json.load(f)
+
+        # Flatten nested JSON into the same columns as the CSVs
+        flat_rows = []
+        for order in web_data:
+            month = pd.to_datetime(order['timestamp']).month
+            if month in [12, 1, 2]: season = 'Winter'
+            elif month in [3, 4, 5]: season = 'Spring'
+            elif month in [6, 7, 8]: season = 'Summer'
+            else: season = 'Fall'
+
+            flat_rows.append({
+                'Transaction_ID': order['order_id'],
+                'Date': order['timestamp'],
+                'Customer_Name': order['customer']['name'],
+                'Product': str(order['items']),
+                'Total_Items': len(order['items']),
+                'Total_Cost': order['payment']['total'],
+                'Payment_Method': order['payment']['method'],
+                'City': order['customer']['city'],
+                'Store_Type': 'Online',
+                'Discount_Applied': False,
+                'Customer_Category': order['customer']['category'],
+                'Season': season,
+                'Promotion': None
+            })
+        df_web = pd.DataFrame(flat_rows)
+        df_web['source_system'] = 'Web_Online'
+        print(f"   ✅ Loaded {len(df_web)} web orders from JSON")
+    else:
+        print(f"   ⚠️ Warning: Web orders file not found at {json_path}")
+
     # Stop if we have nothing
-    if df_kaggle.empty and df_gen.empty:
+    if df_kaggle.empty and df_gen.empty and df_web.empty:
         print("❌ Error: No data files found! Did you run datagenerator.py?")
         return
 
-    # MERGE THEM
-    df = pd.concat([df_kaggle, df_gen], ignore_index=True)
+    # MERGE ALL THREE SOURCES
+    df = pd.concat([df_kaggle, df_gen, df_web], ignore_index=True)
     print(f"   ✅ Merged Total Rows: {len(df)}")
 
     # --- STEP 2: TRANSFORMATION ---
@@ -218,7 +257,7 @@ def run_pipeline():
 
     conn.commit()
     conn.close()
-    print("✅ ETL Complete: Kaggle + New Data Merged Successfully.")
+    print("✅ ETL Complete: Kaggle + Generated CSV + Web JSON Merged Successfully.")
 
 if __name__ == "__main__":
     run_pipeline()

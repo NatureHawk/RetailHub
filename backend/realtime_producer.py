@@ -51,7 +51,7 @@ def run_producer():
             print("   (Is the API server running?)")
         
         # Wait 3 seconds before next order
-        time.sleep(3)
+        time.sleep(15)
 
 if __name__ == "__main__":
     run_producer()

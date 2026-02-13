@@ -100,11 +100,52 @@ def get_commercial_data():
 @app.get("/analytics/operations")
 def get_operations_data():
     conn = get_db()
+
+    # --- Categorization Helper (works around Dim_Product having 'General') ---
+    CATEGORY_MAP = {
+        'Banana': 'Food', 'Milk': 'Food', 'Chips': 'Food', 'Apple': 'Food',
+        'Beef': 'Food', 'Ice Cream': 'Food', 'Tuna': 'Food', 'Eggs': 'Food',
+        'Chicken': 'Food', 'Rice': 'Food', 'Pasta': 'Food', 'Bread': 'Food',
+        'Cheese': 'Food', 'Yogurt': 'Food', 'Butter': 'Food', 'Coffee': 'Food',
+        'Tea': 'Food', 'Sugar': 'Food', 'Cereal Bars': 'Food', 'Honey': 'Food',
+        'Potatoes': 'Food', 'Onions': 'Food', 'Carrots': 'Food', 'Orange': 'Food',
+        'Soda': 'Food', 'Water': 'Food', 'Peanut Butter': 'Food', 'Jam': 'Food',
+        'Ketchup': 'Food', 'BBQ Sauce': 'Food', 'Vinegar': 'Food', 'Pickles': 'Food',
+        'Syrup': 'Food', 'Salt': 'Food', 'Oil': 'Food', 'Flour': 'Food',
+        'Canned Soup': 'Food',
+        'Detergent': 'Home', 'Trash Bags': 'Home', 'Trash Cans': 'Home',
+        'Sponges': 'Home', 'Mop': 'Home', 'Tissues': 'Home',
+        'Shampoo': 'Personal Care', 'Soap': 'Personal Care', 'Toothpaste': 'Personal Care',
+        'Shower Gel': 'Personal Care', 'Hair Gel': 'Personal Care',
+        'Shaving Cream': 'Personal Care', 'Hand Sanitizer': 'Personal Care',
+    }
+
+    # Fetch all sales with product + season
+    rows = conn.execute("SELECT product_key, season FROM Fact_Sales WHERE season IS NOT NULL").fetchall()
+
+    # Group by season + category
+    from collections import defaultdict
+    season_cat = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        cat = CATEGORY_MAP.get(r['product_key'], 'Other')
+        season_cat[r['season']][cat] += 1
+
+    # Build stacked bar data
+    season_order = ['Winter', 'Spring', 'Summer', 'Fall']
+    seasonal_by_category = []
+    for season in season_order:
+        entry = {"name": season}
+        entry.update(season_cat.get(season, {}))
+        seasonal_by_category.append(entry)
+
+    # Keep existing simple seasonal data for backward compat
     seasonal = conn.execute("SELECT season, COUNT(*) as sales_count FROM Fact_Sales WHERE season IS NOT NULL GROUP BY season ORDER BY sales_count DESC").fetchall()
     inv = conn.execute("SELECT AVG(turnover_ratio) as val FROM Fact_Inventory").fetchone()
     delivery = conn.execute("SELECT AVG(delivery_days) as val FROM Fact_Shipments").fetchone()
+
     return {
         "seasonal_trends": [{"season": r['season'], "sales": r['sales_count']} for r in seasonal],
+        "seasonal_by_category": seasonal_by_category,
         "inventory_turnover": round(inv['val'] or 0, 2),
         "avg_delivery_days": round(delivery['val'] or 0, 1)
     }
