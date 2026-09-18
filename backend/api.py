@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import hmac
 import sqlite3
 import os
 import random
@@ -13,7 +14,7 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 API_SECRET_KEY = "retail-hackathon-secure-key-123"
 
 async def verify_key(x_api_key: str = Header(None)):
-    if x_api_key != API_SECRET_KEY:
+    if x_api_key is None or not hmac.compare_digest(x_api_key, API_SECRET_KEY):
         raise HTTPException(status_code=401, detail="Unauthorized: Invalid API Key")
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
